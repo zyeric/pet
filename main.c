@@ -34,6 +34,7 @@
 #include <string.h>
 
 #include <isl/arg.h>
+#include <isl/ast_build.h>
 #include <isl/ctx.h>
 #include <isl/flow.h>
 #include <isl/options.h>
@@ -56,24 +57,29 @@ ISL_ARGS_END
 
 ISL_ARG_DEF(options, struct options, options_args)
 
+void isl_printer_to_stdout(struct isl_printer *p) {
+  char *str = isl_printer_get_str(p);
+  isl_printer_free(p);
+  puts(str);
+  free(str);
+}
+
 void print_isl_union_map(struct isl_ctx* ctx, struct isl_union_map *union_map) {
   isl_printer *p = isl_printer_to_str(ctx);
   p = isl_printer_print_union_map(p, union_map);
-  char *str = isl_printer_get_str(p);
-  isl_printer_free(p);
-  for (int i = 0; i < strlen(str); ++i)  putchar(str[i]);
-  putchar('\n');
-  free(str);
+  isl_printer_to_stdout(p);
 }
   
 void print_isl_schedule(struct isl_schedule *schedule) {
   isl_printer *p = isl_printer_to_str(isl_schedule_get_ctx(schedule));
   p = isl_printer_print_schedule(p, schedule);
-  char *str = isl_printer_get_str(p);
-  isl_printer_free(p);
-  for (int i = 0; i < strlen(str); ++i)  putchar(str[i]);
-  putchar('\n');
-  free(str);
+  isl_printer_to_stdout(p);
+}
+
+void print_isl_pw_multi_aff(struct isl_pw_multi_aff *pw_multi_aff) {
+  isl_printer *p = isl_printer_to_str(isl_pw_multi_aff_get_ctx(pw_multi_aff));
+  p = isl_printer_print_pw_multi_aff(p, pw_multi_aff);
+  isl_printer_to_stdout(p);
 }
 
 static int is_not_kill(struct pet_stmt *stmt)
@@ -160,6 +166,81 @@ void compute_flow_dep(struct pet_scop *scop, isl_union_map **dep_flow,
   isl_union_flow_free(flow);
 }
 
+static __isl_give isl_multi_pw_aff *transform_index(__isl_take isl_multi_pw_aff *index,
+    __isl_keep isl_id *ref_id, void *user) {
+  struct isl_pw_multi_aff *iterator_map = user;
+  index = isl_multi_pw_aff_pullback_pw_multi_aff(index, isl_pw_multi_aff_copy(iterator_map));
+  return index;
+}
+
+static __isl_give isl_ast_expr *transform_expr(__isl_take isl_ast_expr *expr,
+    __isl_keep isl_id *id, void *user) {
+  char* str = isl_ast_expr_to_C_str(expr);
+  return expr;
+}
+
+struct kernel_stmt {
+  struct pet_stmt *stmt;
+  isl_id_to_ast_expr *ref2expr;
+};
+
+static __isl_give isl_ast_node *at_domain(__isl_take isl_ast_node *node,
+    __isl_keep isl_ast_build *build, void *user) {
+  struct pet_scop *scop = user;
+
+  isl_ast_expr *expr, *arg;
+  isl_id *id;
+  const char* name;
+  void *p;
+
+  expr = isl_ast_node_user_get_expr(node);
+  arg = isl_ast_expr_get_op_arg(expr, 0);
+  id = isl_ast_expr_get_id(arg);
+  name = isl_id_get_name(id);
+  // puts(name);
+
+  // line 2118 @gpu.c: find_stmt
+  struct pet_stmt *src_stmt;
+  for (int i = 0; i < scop->n_stmt; ++i) {
+    if (id == isl_set_get_tuple_id(scop->stmts[i]->domain)) {
+      src_stmt = scop->stmts[i];
+      break;
+    }
+  }
+
+  // line 1865 @gpu.c: create_domain_leaf
+  isl_ctx *ctx = isl_ast_node_get_ctx(node);
+  isl_union_map *schedule = isl_ast_build_get_schedule(build);
+  isl_map *map = isl_map_reverse(isl_map_from_union_map(schedule));
+  isl_pw_multi_aff *iterator_map = isl_pw_multi_aff_from_map(map);
+  // print_isl_pw_multi_aff(iterator_map);
+
+  isl_id_to_ast_expr *ref2expr = pet_stmt_build_ast_exprs(src_stmt, build, &transform_index, iterator_map, &transform_expr, p);
+  struct kernel_stmt *gen_stmt;
+  gen_stmt = isl_calloc_type(ctx, struct kernel_stmt);
+  gen_stmt->stmt = src_stmt;
+  gen_stmt->ref2expr = ref2expr;
+  id = isl_id_alloc(ctx, "user", gen_stmt);
+  // isl_printer *printer = isl_printer_to_str(ctx);
+  // pet_stmt_print_body(src_stmt, printer, ref2expr);
+  // isl_printer_to_stdout(printer);
+  return isl_ast_node_set_annotation(node, id);
+}
+
+// line 455 @cuda.c: print_kernel_stmt
+// line 186 @gpu_print.c: ppcg_kernel_print_domain
+static __isl_give isl_printer *print_kernel_stmt(__isl_take isl_printer *p,
+    __isl_take isl_ast_print_options *print_options,
+    __isl_keep isl_ast_node *node, void* user) {
+  isl_id *id;
+  struct kernel_stmt *gen_stmt;
+
+  id = isl_ast_node_get_annotation(node);
+  gen_stmt = isl_id_get_user(id);
+  isl_id_free(id);
+  return pet_stmt_print_body(gen_stmt->stmt, p, gen_stmt->ref2expr);
+}
+
 // line 4378 construct_schedule_constraints @gpu.c
 void compute_schedule(struct pet_scop *scop, isl_union_map *dep_flow,
     isl_union_map *dep_false, isl_ctx* flow_ctx) {
@@ -168,6 +249,8 @@ void compute_schedule(struct pet_scop *scop, isl_union_map *dep_flow,
   isl_union_map *validity, *proximity, *coincidence;
   isl_schedule_constraints *sc;
 
+  // print_isl_union_map(flow_ctx, dep_flow);
+  // print_isl_union_map(flow_ctx, dep_false);
   domain = isl_union_set_copy(collect_non_kill_domains(scop));
   sc = isl_schedule_constraints_on_domain(domain);
   sc = isl_schedule_constraints_set_context(sc, isl_set_copy(scop->context));
@@ -175,17 +258,38 @@ void compute_schedule(struct pet_scop *scop, isl_union_map *dep_flow,
   dep_raw = isl_union_map_copy(dep_flow);
   dep = isl_union_map_copy(dep_false);
   dep = isl_union_map_union(dep, dep_raw);
+  // print_isl_union_map(flow_ctx, dep);
   dep = isl_union_map_coalesce(dep);
   proximity = isl_union_map_copy(dep);
-  coincidence = isl_union_map_copy(dep);
+  // coincidence = isl_union_map_copy(dep);
+  // coincidence = isl_union_map_read_from_str(flow_ctx,
+  //     "[K, M, N] -> { S_0[i, j, k] -> S_0[i' = i, j' = j + 1, k' = k - 1] : 0 <= i < N and 0 < j < M - 1 and  0 < k < K }");
+  coincidence = isl_union_map_read_from_str(flow_ctx, 
+      "[K, M, N] -> { S_0[i, j, k] -> S_0[i', j' = j + 1, k' = k - 1] : i <= i' < N and 0 < j < M - 1 and  0 < k < K }");
   validity = dep;
+  // print_isl_union_map(flow_ctx, validity);
+  // print_isl_union_map(flow_ctx, coincidence);
+  // print_isl_union_map(flow_ctx, proximity);
 
   sc = isl_schedule_constraints_set_validity(sc, validity);
   sc = isl_schedule_constraints_set_coincidence(sc, coincidence);
   sc = isl_schedule_constraints_set_proximity(sc, proximity);
 
   isl_schedule *schedule = isl_schedule_constraints_compute_schedule(sc);
-  print_isl_schedule(schedule);
+  // print_isl_schedule(schedule);
+
+  isl_ast_build *build = isl_ast_build_alloc(flow_ctx);
+  build = isl_ast_build_set_at_each_domain(build, &at_domain, scop);
+  isl_ast_node *tree = isl_ast_build_node_from_schedule(build, schedule);
+
+  // line 480@cuda.c: print_kernel
+  isl_printer *printer = isl_printer_to_str(isl_ast_node_get_ctx(tree));
+  printer = isl_printer_set_output_format(printer, ISL_FORMAT_C);
+
+  isl_ast_print_options *print_options = isl_ast_print_options_alloc(isl_ast_node_get_ctx(tree));
+  print_options = isl_ast_print_options_set_print_user(print_options, &print_kernel_stmt, NULL);
+  printer = isl_ast_node_print(tree, printer, print_options);
+  isl_printer_to_stdout(printer);
 }
 
 int main(int argc, char *argv[])
@@ -199,6 +303,7 @@ int main(int argc, char *argv[])
 	argc = options_parse(options, argc, argv, ISL_ARG_ALL);
 
 	scop = pet_scop_extract_from_C_source(ctx, options->input, NULL);
+  // print_isl_schedule(scop->schedule);
   struct isl_union_map *dep_flow;
   struct isl_union_map *dep_false;
   struct isl_ctx *flow_ctx;
