@@ -145,7 +145,6 @@ void compute_flow_dep(struct pet_scop *scop, isl_union_map **dep_flow,
   isl_ctx *ctx = isl_union_flow_get_ctx(flow);
   *flow_ctx = ctx;
   *dep_flow = isl_union_flow_get_may_dependence(flow);
-  // print_isl_union_map(ctx, dep_flow);
   isl_union_flow_free(flow);
 
   // line 736 @ppcg.c
@@ -197,7 +196,6 @@ static __isl_give isl_ast_node *at_domain(__isl_take isl_ast_node *node,
   arg = isl_ast_expr_get_op_arg(expr, 0);
   id = isl_ast_expr_get_id(arg);
   name = isl_id_get_name(id);
-  // puts(name);
 
   // line 2118 @gpu.c: find_stmt
   struct pet_stmt *src_stmt;
@@ -213,7 +211,6 @@ static __isl_give isl_ast_node *at_domain(__isl_take isl_ast_node *node,
   isl_union_map *schedule = isl_ast_build_get_schedule(build);
   isl_map *map = isl_map_reverse(isl_map_from_union_map(schedule));
   isl_pw_multi_aff *iterator_map = isl_pw_multi_aff_from_map(map);
-  // print_isl_pw_multi_aff(iterator_map);
 
   isl_id_to_ast_expr *ref2expr = pet_stmt_build_ast_exprs(src_stmt, build, &transform_index, iterator_map, &transform_expr, p);
   struct kernel_stmt *gen_stmt;
@@ -221,9 +218,6 @@ static __isl_give isl_ast_node *at_domain(__isl_take isl_ast_node *node,
   gen_stmt->stmt = src_stmt;
   gen_stmt->ref2expr = ref2expr;
   id = isl_id_alloc(ctx, "user", gen_stmt);
-  // isl_printer *printer = isl_printer_to_str(ctx);
-  // pet_stmt_print_body(src_stmt, printer, ref2expr);
-  // isl_printer_to_stdout(printer);
   return isl_ast_node_set_annotation(node, id);
 }
 
@@ -249,8 +243,6 @@ void compute_schedule(struct pet_scop *scop, isl_union_map *dep_flow,
   isl_union_map *validity, *proximity, *coincidence;
   isl_schedule_constraints *sc;
 
-  // print_isl_union_map(flow_ctx, dep_flow);
-  // print_isl_union_map(flow_ctx, dep_false);
   domain = isl_union_set_copy(collect_non_kill_domains(scop));
   sc = isl_schedule_constraints_on_domain(domain);
   sc = isl_schedule_constraints_set_context(sc, isl_set_copy(scop->context));
@@ -258,31 +250,23 @@ void compute_schedule(struct pet_scop *scop, isl_union_map *dep_flow,
   dep_raw = isl_union_map_copy(dep_flow);
   dep = isl_union_map_copy(dep_false);
   dep = isl_union_map_union(dep, dep_raw);
-  // print_isl_union_map(flow_ctx, dep);
   dep = isl_union_map_coalesce(dep);
   proximity = isl_union_map_copy(dep);
-  // coincidence = isl_union_map_copy(dep);
-  // coincidence = isl_union_map_read_from_str(flow_ctx,
-  //     "[K, M, N] -> { S_0[i, j, k] -> S_0[i' = i, j' = j + 1, k' = k - 1] : 0 <= i < N and 0 < j < M - 1 and  0 < k < K }");
-  coincidence = isl_union_map_read_from_str(flow_ctx, 
-      "[K, M, N] -> { S_0[i, j, k] -> S_0[i', j' = j + 1, k' = k - 1] : i <= i' < N and 0 < j < M - 1 and  0 < k < K }");
+  coincidence = isl_union_map_copy(dep);
   validity = dep;
-  // print_isl_union_map(flow_ctx, validity);
-  // print_isl_union_map(flow_ctx, coincidence);
-  // print_isl_union_map(flow_ctx, proximity);
 
   sc = isl_schedule_constraints_set_validity(sc, validity);
   sc = isl_schedule_constraints_set_coincidence(sc, coincidence);
   sc = isl_schedule_constraints_set_proximity(sc, proximity);
 
   isl_schedule *schedule = isl_schedule_constraints_compute_schedule(sc);
-  // print_isl_schedule(schedule);
+  isl_schedule_dump(schedule);
 
   isl_ast_build *build = isl_ast_build_alloc(flow_ctx);
   build = isl_ast_build_set_at_each_domain(build, &at_domain, scop);
   isl_ast_node *tree = isl_ast_build_node_from_schedule(build, schedule);
 
-  // line 480@cuda.c: print_kernel
+  // line 480 @cuda.c: print_kernel
   isl_printer *printer = isl_printer_to_str(isl_ast_node_get_ctx(tree));
   printer = isl_printer_set_output_format(printer, ISL_FORMAT_C);
 
@@ -303,15 +287,15 @@ int main(int argc, char *argv[])
 	argc = options_parse(options, argc, argv, ISL_ARG_ALL);
 
 	scop = pet_scop_extract_from_C_source(ctx, options->input, NULL);
-  // print_isl_schedule(scop->schedule);
+	if (scop)
+		 pet_scop_emit(stdout, scop);
+
+  isl_options_set_schedule_algorithm(ctx, ISL_SCHEDULE_ALGORITHM_FEAUTRIER);
   struct isl_union_map *dep_flow;
   struct isl_union_map *dep_false;
   struct isl_ctx *flow_ctx;
   compute_flow_dep(scop, &dep_flow, &dep_false, &flow_ctx);
   compute_schedule(scop, dep_flow, dep_false, flow_ctx);
-
-	// if (scop)
-	// 	pet_scop_emit(stdout, scop);
 
 	pet_scop_free(scop);
 
